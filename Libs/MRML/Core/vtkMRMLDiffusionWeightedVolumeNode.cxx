@@ -59,39 +59,36 @@ void vtkMRMLDiffusionWeightedVolumeNode::WriteXML(ostream& of, int nIndent)
 {
   Superclass::WriteXML(of, nIndent);
 
-  std::stringstream ss;
+  std::stringstream ssMF;
   for (int i = 0; i < 3; i++)
   {
     for (int j = 0; j < 3; j++)
     {
-      ss << this->MeasurementFrameMatrix[i][j] << " ";
+      ssMF << this->MeasurementFrameMatrix[i][j] << " ";
       if (i != 2 && j != 2)
       {
-        ss << "  ";
+        ssMF << "  ";
       }
     }
   }
-  of << " measurementFrameMatrix=\"" << ss.str() << "\"";
+  of << " measurementFrameMatrix=\"" << ssMF.str() << "\"";
 
-  ss.clear();
-
+  std::stringstream ssGrad;
   for (int g = 0; g < this->DiffusionGradients->GetNumberOfTuples(); g++)
   {
     for (int k = 0; k < 3; k++)
     {
-      ss << this->DiffusionGradients->GetComponent(g, k) << " ";
+      ssGrad << this->DiffusionGradients->GetComponent(g, k) << " ";
     }
   }
+  of << " gradients=\"" << ssGrad.str() << "\"";
 
-  of << " gradients=\"" << ss.str() << "\"";
-
-  ss.clear();
-
+  std::stringstream ssBVal;
   for (int g = 0; g < this->BValues->GetNumberOfTuples(); g++)
   {
-    ss << this->BValues->GetValue(g) << " ";
+    ssBVal << this->BValues->GetValue(g) << " ";
   }
-  of << " bValues=\"" << ss.str() << "\"";
+  of << " bValues=\"" << ssBVal.str() << "\"";
 }
 
 //----------------------------------------------------------------------------
@@ -129,23 +126,20 @@ void vtkMRMLDiffusionWeightedVolumeNode::ReadXMLAttributes(const char** atts)
       double g[3];
       this->DiffusionGradients->Reset();
       this->DiffusionGradients->SetNumberOfComponents(3);
-      while (!ss.eof())
+      while (ss >> g[0])
       {
-        for (int i = 0; i < 3; i++)
-        {
-          ss >> g[i];
-        }
+        ss >> g[1] >> g[2];
         this->DiffusionGradients->InsertNextTuple(g);
       }
     }
     if (!strcmp(attName, "bValues"))
     {
       std::stringstream ss;
+      ss << attValue;
       double val;
       this->BValues->Reset();
-      while (!ss.eof())
+      while (ss >> val)
       {
-        ss >> val;
         this->BValues->InsertNextValue(val);
       }
     }

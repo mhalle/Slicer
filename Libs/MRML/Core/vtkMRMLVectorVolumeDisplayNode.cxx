@@ -104,15 +104,13 @@ void vtkMRMLVectorVolumeDisplayNode::WriteXML(ostream& of, int nIndent)
 {
   Superclass::WriteXML(of, nIndent);
 
-  std::stringstream ss;
+  std::stringstream ssScalar;
+  ssScalar << this->ScalarMode;
+  of << " scalarMode=\"" << ssScalar.str() << "\"";
 
-  ss.clear();
-  ss << this->ScalarMode;
-  of << " scalarMode=\"" << ss.str() << "\"";
-
-  ss.clear();
-  ss << this->GlyphMode;
-  of << " glyphMode=\"" << ss.str() << "\"";
+  std::stringstream ssGlyph;
+  ssGlyph << this->GlyphMode;
+  of << " glyphMode=\"" << ssGlyph.str() << "\"";
 }
 
 //----------------------------------------------------------------------------
