@@ -1008,13 +1008,21 @@ void vtkMRMLMarkupsNode::SetNthControlPointPosition(const int pointIndex, const 
     return;
   }
 
-  // TODO: return if no modification
+  // Return early if no modification to avoid spurious StorableModifiedTime
+  // updates (e.g., during scene import when control points are recomputed
+  // with the same values after transform reference resolution).
+  // See https://github.com/Slicer/Slicer/issues/8603
   double* controlPointPosition = controlPoint->Position;
+  if (controlPointPosition[0] == x && controlPointPosition[1] == y && controlPointPosition[2] == z
+    && controlPoint->PositionStatus == positionStatus)
+  {
+    return;
+  }
 
+  int oldPositionStatus = controlPoint->PositionStatus;
   controlPointPosition[0] = x;
   controlPointPosition[1] = y;
   controlPointPosition[2] = z;
-  int oldPositionStatus = controlPoint->PositionStatus;
   controlPoint->PositionStatus = positionStatus;
 
   if (!this->GetDisableModifiedEvent())
