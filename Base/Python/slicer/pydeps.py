@@ -41,6 +41,33 @@ if TYPE_CHECKING:
     import qt
 
 
+def _generate_environment_constraints() -> str:
+    """Generate a temporary constraints file pinning all currently installed packages.
+
+    Snapshots every installed package and its version, writing ``name==version``
+    lines to a temporary file. This file can be passed to pip as ``-c`` to prevent
+    installation from upgrading or downgrading any package already present in
+    Slicer's Python environment.
+
+    The caller is responsible for cleaning up the temporary file.
+
+    :returns: Path to the temporary constraints file.
+    """
+    import tempfile
+
+    importlib.invalidate_caches()
+    lines = []
+    for dist in importlib.metadata.distributions():
+        name = dist.metadata["Name"]
+        version = dist.metadata["Version"]
+        lines.append(f"{name}=={version}")
+
+    fd, path = tempfile.mkstemp(suffix="-slicer-constraints.txt", prefix="pydeps-")
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(sorted(lines)))
+    return path
+
+
 def _executePythonModule(
     module: str,
     args: list[str],
@@ -349,13 +376,13 @@ def _find_updated_imported_packages(
 def pip_ensure(
     requirements: list[Requirement],
     constraints: str | Path | None = None,
-    skip_packages: list[str] | None = None,
+    protect_environment: bool = True,
     prompt_install: bool = True,
     prompt_restart: bool = True,
     requester: str | None = None,
     skip_in_testing: bool = True,
     show_progress: bool = True,
-) -> list[str] | None:
+) -> None:
     """Ensure requirements are satisfied, installing if needed.
 
     Call at the point where dependencies are actually needed (e.g., in an
@@ -374,9 +401,11 @@ def pip_ensure(
         Constraints files use the same format as requirements files but only constrain
         versions without triggering installation. Useful for ensuring compatible
         versions across multiple extensions.
-    :param skip_packages: Package names to exclude from installation (and from the
-        dependency tree). Forwarded to :func:`pip_install` — see its documentation
-        for full details.
+    :param protect_environment: If True (default), auto-generate constraints that pin
+        all packages currently installed in Slicer's Python environment. This prevents
+        pip from upgrading or downgrading any existing package. If a requirement
+        genuinely conflicts with an installed version, pip will raise an error rather
+        than silently modifying the environment.
     :param prompt_install: If True (default), show confirmation dialog before installing.
     :param prompt_restart: If True (default), check whether any updated packages were
         already imported and, if so, show a dialog recommending a restart. The user
@@ -390,9 +419,6 @@ def pip_ensure(
     :param show_progress: If True (default), show progress dialog during installation
         with status updates and collapsible log details. If False, show only
         a busy cursor during installation.
-
-    :returns: When ``skip_packages`` is provided, a list of skipped requirement strings
-        (forwarded from :func:`pip_install`). Otherwise ``None``.
 
     :raises RuntimeError: If user declines installation.
     :raises subprocess.CalledProcessError: If installation fails.
@@ -418,7 +444,7 @@ def pip_ensure(
               # Now safe to use skimage
               filtered = skimage.filters.gaussian(array, sigma=2.0)
 
-    For more examples (constraints, skip_packages), see
+    For more examples, see
     :doc:`/developer_guide/script_repository` (Python package management section).
 
     """
@@ -430,11 +456,12 @@ def pip_ensure(
     # Check if we're in full Slicer or PythonSlicer
     if not _isSlicerAppAvailable():
         # Running in PythonSlicer - just do simple install (prompt not available)
-        return pip_install(
+        pip_install(
             [str(req) for req in missing],
             constraints=constraints,
-            skip_packages=skip_packages,
+            protect_environment=protect_environment,
         )
+        return
 
     import slicer
 
@@ -460,17 +487,17 @@ def pip_ensure(
     before_versions = _get_installed_versions() if prompt_restart else None
 
     # Install missing packages with optional progress display
-    skipped = pip_install(
+    pip_install(
         [str(req) for req in missing],
         constraints=constraints,
-        skip_packages=skip_packages,
+        protect_environment=protect_environment,
         blocking=True,
         show_progress=show_progress,
         requester=requester,
     )
 
     if not prompt_restart:
-        return skipped
+        return
 
     # Check if any updated packages were already imported
     after_versions = _get_installed_versions()
@@ -507,7 +534,7 @@ def pip_ensure(
             ):
                 slicer.util.restart()
 
-    return skipped
+    return
 
 
 def _isSlicerAppAvailable() -> bool:
@@ -526,14 +553,14 @@ def pip_install(
     requirements: str | list[str],
     constraints: str | Path | None = None,
     no_deps_requirements: str | list[str] | None = None,
-    skip_packages: list[str] | None = None,
+    protect_environment: bool = True,
     blocking: bool = True,
     show_progress: bool = True,
     requester: str | None = None,
     parent: qt.QWidget | None = None,
     logCallback: Callable[[str], None] | None = None,
     completedCallback: Callable[[int], None] | None = None,
-) -> list[str] | None:
+) -> None:
     """Install python packages.
 
     Currently, the method simply calls ``python -m pip install`` but in the future further checks, optimizations,
@@ -553,13 +580,11 @@ def pip_install(
         that conflict with other packages. Can be a string or list, same format as ``requirements``.
         When provided, installation happens in two steps: first ``no_deps_requirements`` are
         installed with ``--no-deps``, then ``requirements`` are installed normally.
-        Mutually exclusive with ``skip_packages``.
-    :param skip_packages: Package names to exclude from the dependency tree. Installs
-        each requirement with ``--no-deps``, walks its dependencies recursively, and
-        skips any package in this list. Metadata is scrubbed so pip won't try to install
-        them later. Name matching is case-insensitive and normalizes hyphens/underscores.
-        Returns a list of the skipped requirement strings.
-        Requires ``blocking=True``. Mutually exclusive with ``no_deps_requirements``.
+    :param protect_environment: If True (default), auto-generate constraints that pin
+        all packages currently installed in Slicer's Python environment. This prevents
+        pip from upgrading or downgrading any existing package as a side effect of
+        installing new packages. Set to False only when you explicitly intend to
+        upgrade an existing package (e.g., ``pip_install("--upgrade numpy", protect_environment=False)``).
     :param blocking: If True (default), block until installation completes and raise
         CalledProcessError on failure. If False, return immediately and use callbacks.
         Note: When running in PythonSlicer (without the full application), blocking mode
@@ -581,13 +606,8 @@ def pip_install(
         when installation finished.
         Signature: ``completedCallback(returnCode: int) -> None``
 
-    :returns: When ``skip_packages`` is provided, a list of skipped requirement strings
-        (e.g., ``["torch>=2.0", "SimpleITK>=2.0.2"]``). Otherwise ``None``.
-
     :raises subprocess.CalledProcessError: In blocking mode, if pip installation fails.
         When show_progress=True, an error dialog with the full log is shown before raising.
-    :raises ValueError: If ``skip_packages`` is combined with ``no_deps_requirements``
-        or with ``blocking=False``.
 
     .. warning::
 
@@ -595,57 +615,31 @@ def pip_install(
         while installation is in progress. Consider disabling relevant UI elements
         to prevent conflicts.
 
-    .. note::
-
-        **Choosing between** ``skip_packages`` **and** ``no_deps_requirements``:
-
-        - ``no_deps_requirements``: the package has broken dependency declarations
-          and you provide the correct deps yourself. Fast (2 pip calls), no metadata
-          changes.
-        - ``skip_packages``: you want the full dependency tree except for specific
-          packages already provided by Slicer (e.g., SimpleITK, torch). Slower (one
-          pip call per package) but automatic.
-
     Example:
 
     .. code-block:: python
 
       pip_install("pandas scipy scikit-learn")
 
-    For more examples (constraints, non-blocking mode, skip_packages, no_deps_requirements),
+    For more examples (constraints, non-blocking mode, no_deps_requirements),
     see :doc:`/developer_guide/script_repository` (Python package management section).
 
     """
-    # Validate skip_packages constraints
-    if skip_packages is not None:
-        if no_deps_requirements is not None:
-            raise ValueError(
-                "skip_packages and no_deps_requirements are mutually exclusive. "
-                "skip_packages installs each package with --no-deps internally.",
-            )
-        if not blocking:
-            raise ValueError(
-                "skip_packages requires blocking=True. "
-                "The recursive dependency walk cannot run in non-blocking mode.",
-            )
-
     # Check if we're running in full Slicer or PythonSlicer
     if not _isSlicerAppAvailable():
         # Running in PythonSlicer - use simple blocking mode
-        if skip_packages is not None:
-            return _pip_install_with_skips(requirements, skip_packages, constraints)
-        _pip_install_simple(requirements, constraints, no_deps_requirements)
-        return None
+        _pip_install_simple(requirements, constraints, no_deps_requirements,
+                            protect_environment)
+        return
 
     import slicer
 
     # In testing mode, skip UI and use simple blocking install
     if slicer.app.testingEnabled():
         logging.info("Testing mode is enabled: skipping progress UI for pip_install")
-        if skip_packages is not None:
-            return _pip_install_with_skips(requirements, skip_packages, constraints)
-        _pip_install_simple(requirements, constraints, no_deps_requirements)
-        return None
+        _pip_install_simple(requirements, constraints, no_deps_requirements,
+                            protect_environment)
+        return
 
     # Check for concurrent non-blocking installs
     if not blocking and _pip_install_in_progress:
@@ -654,45 +648,36 @@ def pip_install(
             "Wait for it to complete or use blocking=True.",
         )
 
-    # skip_packages dispatch (blocking only)
-    if skip_packages is not None:
-        if show_progress:
-            return _pip_install_with_skips_dialog(
-                requirements, skip_packages, constraints, requester, parent,
-            )
-        else:
-            return _pip_install_with_skips_busy_cursor(
-                requirements, skip_packages, constraints,
-            )
-
     # Determine which mode to use based on show_progress and blocking
     if show_progress and blocking:
         # Modal progress dialog (blocking from user's perspective, but UI responsive)
         _pip_install_with_dialog(
             requirements, constraints, no_deps_requirements, requester, parent,
+            protect_environment,
         )
     elif show_progress and not blocking:
         # Status bar progress (non-blocking)
         _pip_install_with_statusbar(
             requirements, constraints, no_deps_requirements, requester,
-            logCallback, completedCallback,
+            logCallback, completedCallback, protect_environment,
         )
     elif not show_progress and blocking:
         # Busy cursor only
-        _pip_install_with_busy_cursor(requirements, constraints, no_deps_requirements)
+        _pip_install_with_busy_cursor(requirements, constraints, no_deps_requirements,
+                                      protect_environment)
     else:
         # Non-blocking, no progress (existing behavior)
         _pip_install_nonblocking(
             requirements, constraints, no_deps_requirements,
-            logCallback, completedCallback,
+            logCallback, completedCallback, protect_environment,
         )
-    return None
 
 
 def _pip_install_simple(
     requirements: str | list[str],
     constraints: str | Path | None = None,
     no_deps_requirements: str | list[str] | None = None,
+    protect_environment: bool = True,
 ) -> None:
     """Simple blocking pip install without any UI (for PythonSlicer and testing mode).
 
@@ -700,11 +685,13 @@ def _pip_install_simple(
     """
     # Handle no_deps_requirements first
     if no_deps_requirements is not None:
-        args = _build_pip_args(no_deps_requirements, constraints, no_deps=True)
+        args = _build_pip_args(no_deps_requirements, constraints, no_deps=True,
+                               protect_environment=protect_environment)
         _executePythonModule("pip", args, blocking=True)
 
     # Then install regular requirements
-    args = _build_pip_args(requirements, constraints, no_deps=False)
+    args = _build_pip_args(requirements, constraints, no_deps=False,
+                           protect_environment=protect_environment)
     _executePythonModule("pip", args, blocking=True)
 
 
@@ -712,6 +699,7 @@ def _pip_install_with_busy_cursor(
     requirements: str | list[str],
     constraints: str | Path | None = None,
     no_deps_requirements: str | list[str] | None = None,
+    protect_environment: bool = True,
 ) -> None:
     """Blocking pip install with busy cursor.
 
@@ -721,7 +709,8 @@ def _pip_install_with_busy_cursor(
 
     qt.QApplication.setOverrideCursor(qt.Qt.BusyCursor)
     try:
-        _pip_install_simple(requirements, constraints, no_deps_requirements)
+        _pip_install_simple(requirements, constraints, no_deps_requirements,
+                            protect_environment)
     finally:
         qt.QApplication.restoreOverrideCursor()
 
@@ -732,6 +721,7 @@ def _pip_install_with_dialog(
     no_deps_requirements: str | list[str] | None = None,
     requester: str | None = None,
     parent: qt.QWidget | None = None,
+    protect_environment: bool = True,
 ) -> None:
     """Blocking pip install with modal progress dialog.
 
@@ -763,6 +753,7 @@ def _pip_install_with_dialog(
     _pip_install_nonblocking(
         requirements, constraints, no_deps_requirements,
         logCallback=onLog, completedCallback=onComplete,
+        protect_environment=protect_environment,
     )
 
     # Wait for completion while keeping UI responsive
@@ -788,6 +779,7 @@ def _pip_install_with_statusbar(
     requester: str | None = None,
     logCallback: Callable[[str], None] | None = None,
     completedCallback: Callable[[int], None] | None = None,
+    protect_environment: bool = True,
 ) -> None:
     """Non-blocking pip install with status bar messages.
 
@@ -823,6 +815,7 @@ def _pip_install_with_statusbar(
         _pip_install_nonblocking(
             requirements, constraints, no_deps_requirements,
             logCallback=wrappedLogCallback, completedCallback=wrappedCompletedCallback,
+            protect_environment=protect_environment,
         )
     except Exception:
         # Not `finally` - on success, cursor stays busy until wrappedCompletedCallback fires
@@ -837,6 +830,7 @@ def _pip_install_nonblocking(
     no_deps_requirements: str | list[str] | None = None,
     logCallback: Callable[[str], None] | None = None,
     completedCallback: Callable[[int], None] | None = None,
+    protect_environment: bool = True,
 ) -> None:
     """Non-blocking pip install.
 
@@ -856,7 +850,8 @@ def _pip_install_nonblocking(
     try:
         if no_deps_requirements is None:
             # Simple case - single install
-            args = _build_pip_args(requirements, constraints, no_deps=False)
+            args = _build_pip_args(requirements, constraints, no_deps=False,
+                                   protect_environment=protect_environment)
             _executePythonModule("pip", args, blocking=False,
                                  logCallback=logCallback, completedCallback=wrappedCompletedCallback)
             return
@@ -871,11 +866,13 @@ def _pip_install_nonblocking(
                     completedCallback(returnCode)
                 return
             # Success - proceed to regular install (flag stays set until final completion)
-            args = _build_pip_args(requirements, constraints, no_deps=False)
+            args = _build_pip_args(requirements, constraints, no_deps=False,
+                                   protect_environment=protect_environment)
             _executePythonModule("pip", args, blocking=False,
                                  logCallback=logCallback, completedCallback=wrappedCompletedCallback)
 
-        no_deps_args = _build_pip_args(no_deps_requirements, constraints, no_deps=True)
+        no_deps_args = _build_pip_args(no_deps_requirements, constraints, no_deps=True,
+                                       protect_environment=protect_environment)
         _executePythonModule("pip", no_deps_args, blocking=False,
                              logCallback=logCallback, completedCallback=onNoDepsComplete)
     except Exception:
@@ -883,55 +880,20 @@ def _pip_install_nonblocking(
         raise
 
 
-def _pip_install_with_skips_dialog(
-    requirements: str | list[str],
-    skip_packages: list[str],
-    constraints: str | Path | None = None,
-    requester: str | None = None,
-    parent: qt.QWidget | None = None,
-) -> list[str]:
-    """Recursive skip-packages install with modal progress dialog."""
-    import slicer
-
-    dialog = _PipProgressDialog(requester=requester, parent=parent)
-    dialog.show()
-    slicer.app.processEvents()
-
-    try:
-        skipped = _pip_install_with_skips(
-            requirements, skip_packages, constraints, log_fn=dialog.appendLog,
-        )
-    finally:
-        dialog.close()
-
-    return skipped
-
-
-def _pip_install_with_skips_busy_cursor(
-    requirements: str | list[str],
-    skip_packages: list[str],
-    constraints: str | Path | None = None,
-) -> list[str]:
-    """Recursive skip-packages install with busy cursor only."""
-    import qt
-
-    qt.QApplication.setOverrideCursor(qt.Qt.BusyCursor)
-    try:
-        return _pip_install_with_skips(requirements, skip_packages, constraints)
-    finally:
-        qt.QApplication.restoreOverrideCursor()
-
 
 def _build_pip_args(
     requirements: str | list[str],
     constraints: str | Path | None = None,
     no_deps: bool = False,
+    protect_environment: bool = True,
 ) -> list[str]:
     """Build pip install command-line arguments.
 
     :param requirements: Package requirements (string or list).
     :param constraints: Path to constraints file, or None.
     :param no_deps: If True, add --no-deps flag.
+    :param protect_environment: If True, auto-generate constraints pinning all
+        currently installed packages to prevent pip from modifying them.
     :returns: List of arguments for pip install command.
     """
     if type(requirements) == str:
@@ -944,172 +906,17 @@ def _build_pip_args(
     if no_deps:
         args.append("--no-deps")
 
+    # Auto-generated constraints to protect existing packages
+    if protect_environment:
+        env_constraints = _generate_environment_constraints()
+        args.extend(["-c", env_constraints])
+
+    # User-provided constraints layered on top
     if constraints is not None:
         args.extend(["-c", str(constraints)])
 
     return args
 
-
-def _pip_install_with_skips(
-    requirements: str | list[str],
-    skip_packages: list[str],
-    constraints: str | Path | None = None,
-    log_fn: Callable[[str], None] | None = None,
-) -> list[str]:
-    """Install packages while skipping named packages from the dependency tree.
-
-    Each package is installed with ``--no-deps``, and its dependencies (and
-    their dependencies, recursively) are also installed — except for packages
-    in *skip_packages*. Package metadata is updated after each install so that
-    pip does not later try to install the skipped packages.
-
-    This function is always blocking.
-
-    :param requirements: Package requirements (string or list).
-    :param skip_packages: Package names to exclude from installation.
-    :param constraints: Path to constraints file, or None.
-    :param log_fn: Optional callback for status and pip output lines.
-    :returns: List of skipped requirement strings (e.g. ``["torch>=2.0"]``).
-    """
-    # Parse requirements
-    if isinstance(requirements, str):
-        req_strings = shlex.split(requirements)
-    else:
-        req_strings = list(requirements)
-
-    skip_set = {canonicalize_name(name) for name in skip_packages}
-    seen: set[str] = set()
-    skipped: list[str] = []
-
-    def _log(msg):
-        if log_fn:
-            log_fn(msg)
-        # Keep UI responsive between pip calls
-        try:
-            from slicer import app
-            app.processEvents()
-        except ImportError:
-            pass
-
-    def _install_one(req):
-        """Recursively install a single requirement, skipping packages in skip_set."""
-        canonical = canonicalize_name(req.name)
-
-        # Cycle / duplicate detection
-        if canonical in seen:
-            return
-        seen.add(canonical)
-
-        # Check skip list
-        if canonical in skip_set:
-            skipped.append(str(req))
-            _log(f"Skipping {req.name} (in skip list)")
-            return
-
-        # Evaluate environment markers
-        if req.marker is not None and not req.marker.evaluate():
-            return
-
-        # Check if already satisfied
-        if pip_check(req):
-            _log(f"{req.name} already satisfied")
-            return
-
-        # Install with --no-deps
-        _log(f"Installing {req.name}...")
-        # Strip the marker — we already evaluated it above, and passing it
-        # through as a string would be mangled by shlex.split in _build_pip_args.
-        extras_str = f"[{','.join(req.extras)}]" if req.extras else ""
-        install_str = f"{req.name}{extras_str}{req.specifier}"
-        args = _build_pip_args(install_str, constraints, no_deps=True)
-        _executePythonModule("pip", args, blocking=True, logCallback=log_fn)
-
-        # Read sub-dependencies from installed metadata
-        importlib.invalidate_caches()
-        try:
-            sub_deps = importlib.metadata.requires(req.name) or []
-        except importlib.metadata.PackageNotFoundError:
-            sub_deps = []
-
-        # Scrub METADATA before recursing — if the walk is interrupted,
-        # the METADATA for already-installed packages is still cleaned.
-        if skip_set:
-            _scrub_metadata(canonical, skip_set)
-
-        # Recurse on each sub-dependency
-        for dep_str in sub_deps:
-            try:
-                dep_req = Requirement(dep_str)
-            except Exception:
-                continue  # skip malformed dependency strings
-
-            # Skip extras-gated dependencies (optional, not required)
-            if dep_req.marker is not None and "extra" in str(dep_req.marker):
-                continue
-
-            try:
-                _install_one(dep_req)
-            except CalledProcessError:
-                logging.warning("Failed to install %s, continuing with remaining dependencies", dep_req.name)
-                _log(f"WARNING: Failed to install {dep_req.name}")
-
-    # Process each top-level requirement
-    for req_str in req_strings:
-        try:
-            req = Requirement(req_str)
-        except Exception:
-            logging.warning("Could not parse requirement: %s", req_str)
-            continue
-        _install_one(req)
-
-    return skipped
-
-
-def _scrub_metadata(package_name: str, skip_set: set[str]) -> None:
-    """Remove Requires-Dist lines for skipped packages from installed METADATA.
-
-    After installing a package with ``--no-deps``, its METADATA file still
-    declares all original dependencies. This function removes the
-    ``Requires-Dist`` entries for packages in *skip_set* so that future
-    ``pip check`` or ``pip install --upgrade`` operations do not attempt to
-    install them.
-
-    :param package_name: Name of the installed package whose METADATA to modify.
-    :param skip_set: Set of **canonicalized** package names to remove.
-    """
-    try:
-        dist = importlib.metadata.distribution(package_name)
-    except importlib.metadata.PackageNotFoundError:
-        logging.warning("_scrub_metadata: distribution not found for %s", package_name)
-        return
-
-    # Locate the METADATA file within the distribution
-    meta_path = None
-    if dist.files:
-        for p in dist.files:
-            if p.name == "METADATA":
-                meta_path = p.locate()
-                break
-
-    if meta_path is None:
-        logging.warning("_scrub_metadata: METADATA file not found for %s", package_name)
-        return
-
-    # Use latin-1 encoding because some packages have non-UTF-8 metadata
-    with open(meta_path, "r+", encoding="latin-1") as f:
-        lines = f.readlines()
-        f.seek(0)
-        for line in lines:
-            if line.startswith("Requires-Dist: "):
-                req_str = line[len("Requires-Dist: "):].strip()
-                try:
-                    req = Requirement(req_str)
-                    if canonicalize_name(req.name) in skip_set:
-                        continue  # drop this line
-                except Exception:
-                    pass  # keep malformed lines
-            f.write(line)
-        f.truncate()
 
 
 def pip_uninstall(
