@@ -23,11 +23,11 @@ class UtilPipInstallWrapperTest(unittest.TestCase):
             slicer.util.pip_install("pkg", constraints="/tmp/c.txt", show_progress=False)
             mock.assert_called_once_with("pkg", constraints="/tmp/c.txt", show_progress=False)
 
-    def test_returns_value(self):
-        """Test that the return value is propagated."""
-        with unittest.mock.patch("slicer.pydeps.pip_install", return_value=["skipped"]):
-            result = slicer.util.pip_install("pkg", skip_packages=["torch"])
-            self.assertEqual(result, ["skipped"])
+    def test_delegates_protect_environment(self):
+        """Test that protect_environment kwarg is forwarded."""
+        with unittest.mock.patch("slicer.pydeps.pip_install") as mock:
+            slicer.util.pip_install("pkg", protect_environment=False)
+            mock.assert_called_once_with("pkg", protect_environment=False)
 
 
 class UtilPipUninstallWrapperTest(unittest.TestCase):

@@ -1,8 +1,8 @@
 """Unit tests for slicer.pydeps module.
 
 Tests for: load_requirements, load_pyproject_dependencies, pip_check, pip_ensure,
-pip_install (with progress, non-blocking, and skip_packages modes),
-_scrub_metadata, and _PipProgressDialog.
+pip_install (with progress, non-blocking, and protect_environment modes),
+and _PipProgressDialog.
 """
 
 import importlib.metadata
@@ -847,510 +847,93 @@ class GetInstalledVersionsSubprocessTest(unittest.TestCase):
                 pass
 
 
-class ScrubMetadataTest(unittest.TestCase):
-    """Tests for slicer.pydeps._scrub_metadata."""
 
-    def test_removes_matching_requires_dist(self):
-        """Test that Requires-Dist lines for skipped packages are removed."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("Metadata-Version: 2.1\n")
-            f.write("Name: my-package\n")
-            f.write("Version: 1.0.0\n")
-            f.write("Requires-Dist: numpy>=1.20\n")
-            f.write("Requires-Dist: torch>=2.0\n")
-            f.write("Requires-Dist: scipy>=1.0\n")
-            temp_path = f.name
+class GenerateEnvironmentConstraintsTest(unittest.TestCase):
+    """Tests for slicer.pydeps._generate_environment_constraints."""
 
+    def test_generates_pinned_constraints(self):
+        """Test that constraints file contains name==version pins."""
+        path = slicer.pydeps._generate_environment_constraints()
         try:
-            # Create a mock distribution that points to our temp file
-            mock_file = unittest.mock.MagicMock()
-            mock_file.name = "METADATA"
-            mock_file.locate.return_value = temp_path
-            mock_dist = unittest.mock.MagicMock()
-            mock_dist.files = [mock_file]
-
-            with unittest.mock.patch("importlib.metadata.distribution", return_value=mock_dist):
-                slicer.pydeps._scrub_metadata("my-package", {"torch"})
-
-            with open(temp_path, encoding="latin-1") as f:
+            with open(path) as f:
                 content = f.read()
-
-            self.assertIn("Requires-Dist: numpy>=1.20", content)
-            self.assertIn("Requires-Dist: scipy>=1.0", content)
-            self.assertNotIn("torch", content)
+            # Should contain at least one pin (packaging is certainly installed)
+            self.assertIn("==", content)
+            # Should have trailing newline
+            self.assertTrue(content.endswith("\n"))
+            # Lines should be sorted
+            lines = content.strip().split("\n")
+            self.assertEqual(lines, sorted(lines))
         finally:
-            os.unlink(temp_path)
+            os.unlink(path)
 
-    def test_canonicalizes_names(self):
-        """Test that package names are compared in canonicalized form."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("Metadata-Version: 2.1\n")
-            f.write("Requires-Dist: SimpleITK>=2.0\n")
-            f.write("Requires-Dist: numpy>=1.20\n")
-            temp_path = f.name
+    def test_deduplicates_by_canonical_name(self):
+        """Test that duplicate distributions are deduplicated."""
+        mock_dist1 = unittest.mock.MagicMock()
+        mock_dist1.metadata = {"Name": "My-Package", "Version": "1.0.0"}
+        mock_dist2 = unittest.mock.MagicMock()
+        mock_dist2.metadata = {"Name": "my_package", "Version": "2.0.0"}
 
+        with unittest.mock.patch("importlib.metadata.distributions", return_value=[mock_dist1, mock_dist2]):
+            path = slicer.pydeps._generate_environment_constraints()
         try:
-            mock_file = unittest.mock.MagicMock()
-            mock_file.name = "METADATA"
-            mock_file.locate.return_value = temp_path
-            mock_dist = unittest.mock.MagicMock()
-            mock_dist.files = [mock_file]
-
-            # Skip set uses canonicalized form (lowercase, hyphens)
-            with unittest.mock.patch("importlib.metadata.distribution", return_value=mock_dist):
-                slicer.pydeps._scrub_metadata("my-package", {"simpleitk"})
-
-            with open(temp_path, encoding="latin-1") as f:
+            with open(path) as f:
                 content = f.read()
-
-            self.assertNotIn("SimpleITK", content)
-            self.assertIn("numpy", content)
+            # Should only have one entry for the package (last one wins)
+            lines = [l for l in content.strip().split("\n") if "my-package" in l]
+            self.assertEqual(len(lines), 1)
+            self.assertIn("my-package==2.0.0", lines[0])
         finally:
-            os.unlink(temp_path)
+            os.unlink(path)
 
-    def test_preserves_non_requires_dist_lines(self):
-        """Test that non-Requires-Dist metadata lines are preserved."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("Metadata-Version: 2.1\n")
-            f.write("Name: my-package\n")
-            f.write("Version: 1.0.0\n")
-            f.write("Summary: A test package\n")
-            f.write("Requires-Dist: torch>=2.0\n")
-            temp_path = f.name
+    def test_uses_canonical_names(self):
+        """Test that package names are canonicalized in output."""
+        mock_dist = unittest.mock.MagicMock()
+        mock_dist.metadata = {"Name": "PyYAML", "Version": "6.0"}
 
+        with unittest.mock.patch("importlib.metadata.distributions", return_value=[mock_dist]):
+            path = slicer.pydeps._generate_environment_constraints()
         try:
-            mock_file = unittest.mock.MagicMock()
-            mock_file.name = "METADATA"
-            mock_file.locate.return_value = temp_path
-            mock_dist = unittest.mock.MagicMock()
-            mock_dist.files = [mock_file]
-
-            with unittest.mock.patch("importlib.metadata.distribution", return_value=mock_dist):
-                slicer.pydeps._scrub_metadata("my-package", {"torch"})
-
-            with open(temp_path, encoding="latin-1") as f:
+            with open(path) as f:
                 content = f.read()
-
-            self.assertIn("Metadata-Version: 2.1", content)
-            self.assertIn("Name: my-package", content)
-            self.assertIn("Version: 1.0.0", content)
-            self.assertIn("Summary: A test package", content)
+            self.assertIn("pyyaml==6.0", content)
+            self.assertNotIn("PyYAML", content)
         finally:
-            os.unlink(temp_path)
-
-    def test_handles_missing_distribution(self):
-        """Test that missing distribution does not crash."""
-        with unittest.mock.patch(
-            "importlib.metadata.distribution",
-            side_effect=importlib.metadata.PackageNotFoundError("not-found"),
-        ):
-            # Should not raise
-            slicer.pydeps._scrub_metadata("not-found", {"torch"})
-
-
-class PipInstallWithSkipsTest(unittest.TestCase):
-    """Tests for slicer.pydeps._pip_install_with_skips."""
-
-    def _mock_dep_tree(self, tree, installed=None):
-        """Return patches for a simulated dependency tree.
-
-        :param tree: dict mapping package name -> list of dependency strings.
-        :param installed: set of package names already installed.
-        :returns: list of mock context managers to enter.
-        """
-        if installed is None:
-            installed = set()
-
-        def mock_version(name):
-            from packaging.utils import canonicalize_name
-            if canonicalize_name(name) in {canonicalize_name(n) for n in installed}:
-                return "1.0.0"
-            raise importlib.metadata.PackageNotFoundError(name)
-
-        def mock_requires(name):
-            from packaging.utils import canonicalize_name
-            canonical = canonicalize_name(name)
-            for key, deps in tree.items():
-                if canonicalize_name(key) == canonical:
-                    return deps
-            return []
-
-        return [
-            unittest.mock.patch("importlib.metadata.version", side_effect=mock_version),
-            unittest.mock.patch("importlib.metadata.requires", side_effect=mock_requires),
-            unittest.mock.patch("importlib.invalidate_caches"),
-            unittest.mock.patch("slicer.pydeps._scrub_metadata"),
-        ]
-
-    def test_skips_named_packages(self):
-        """Test that packages in skip list are not installed."""
-        tree = {"top-pkg": ["torch>=2.0", "numpy>=1.0"]}
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            for p in patches:
-                p.start()
-            try:
-                skipped = slicer.pydeps._pip_install_with_skips(
-                    "top-pkg", skip_packages=["torch"],
-                )
-            finally:
-                for p in patches:
-                    p.stop()
-
-        # torch should be skipped, not installed
-        self.assertEqual(len(skipped), 1)
-        self.assertIn("torch", skipped[0])
-
-        # top-pkg and numpy should have install calls (2 calls)
-        install_calls = [
-            c for c in mock_exec.call_args_list
-            if c[0][0] == "pip"
-        ]
-        installed_names = []
-        for call in install_calls:
-            args = call[0][1]  # pip args list
-            # Find the requirement string (comes after "install")
-            install_idx = args.index("install")
-            req_str = args[install_idx + 1]
-            installed_names.append(req_str)
-        self.assertIn("top-pkg", installed_names)
-        self.assertIn("numpy>=1.0", installed_names)
-        self.assertNotIn("torch>=2.0", installed_names)
-
-    def test_recursive_skip_at_depth(self):
-        """Test that skip applies to transitive dependencies."""
-        tree = {
-            "top-pkg": ["mid-pkg>=1.0"],
-            "mid-pkg": ["torch>=2.0", "scipy>=1.0"],
-        }
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            for p in patches:
-                p.start()
-            try:
-                skipped = slicer.pydeps._pip_install_with_skips(
-                    "top-pkg", skip_packages=["torch"],
-                )
-            finally:
-                for p in patches:
-                    p.stop()
-
-        self.assertEqual(len(skipped), 1)
-        self.assertIn("torch", skipped[0])
-
-        # Should have installed: top-pkg, mid-pkg, scipy (3 calls)
-        self.assertEqual(mock_exec.call_count, 3)
-
-    def test_returns_skipped_requirement_strings(self):
-        """Test that return value contains full PEP 508 strings."""
-        tree = {"pkg": ["torch>=2.0.1", "SimpleITK>=2.0.2"]}
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule"):
-            for p in patches:
-                p.start()
-            try:
-                skipped = slicer.pydeps._pip_install_with_skips(
-                    "pkg", skip_packages=["torch", "SimpleITK"],
-                )
-            finally:
-                for p in patches:
-                    p.stop()
-
-        self.assertEqual(len(skipped), 2)
-        # Should contain the full specifier strings
-        skipped_str = " ".join(skipped)
-        self.assertIn("torch>=2.0.1", skipped_str)
-        self.assertIn("SimpleITK>=2.0.2", skipped_str)
-
-    def test_cycle_detection(self):
-        """Test that circular dependencies don't cause infinite loops."""
-        tree = {
-            "pkg-a": ["pkg-b>=1.0"],
-            "pkg-b": ["pkg-a>=1.0"],
-        }
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule"):
-            for p in patches:
-                p.start()
-            try:
-                # Should complete without hanging
-                slicer.pydeps._pip_install_with_skips("pkg-a", skip_packages=[])
-            finally:
-                for p in patches:
-                    p.stop()
-
-    def test_skips_extras_gated_deps(self):
-        """Test that extras-gated dependencies are not walked."""
-        tree = {"pkg": ['ruff>=0.1; extra == "dev"', "numpy>=1.0"]}
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            for p in patches:
-                p.start()
-            try:
-                slicer.pydeps._pip_install_with_skips("pkg", skip_packages=[])
-            finally:
-                for p in patches:
-                    p.stop()
-
-        # Should install pkg and numpy, NOT ruff
-        installed_reqs = []
-        for call in mock_exec.call_args_list:
-            args = call[0][1]
-            install_idx = args.index("install")
-            installed_reqs.append(args[install_idx + 1])
-
-        self.assertIn("pkg", installed_reqs)
-        self.assertIn("numpy>=1.0", installed_reqs)
-        self.assertNotIn("ruff>=0.1", installed_reqs)
-
-    def test_evaluates_env_markers(self):
-        """Test that platform-inappropriate deps are skipped."""
-        tree = {"pkg": ['win-only>=1.0; sys_platform == "nonexistent"', "numpy>=1.0"]}
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            for p in patches:
-                p.start()
-            try:
-                slicer.pydeps._pip_install_with_skips("pkg", skip_packages=[])
-            finally:
-                for p in patches:
-                    p.stop()
-
-        # Should install pkg and numpy, NOT win-only
-        installed_reqs = []
-        for call in mock_exec.call_args_list:
-            args = call[0][1]
-            install_idx = args.index("install")
-            installed_reqs.append(args[install_idx + 1])
-
-        self.assertNotIn("win-only>=1.0", installed_reqs)
-        self.assertIn("numpy>=1.0", installed_reqs)
-
-    def test_strips_markers_before_pip_call(self):
-        """Test that env markers are stripped from args passed to pip.
-
-        When a sub-dependency has a marker that evaluates to True,
-        the marker has served its purpose. Passing it through as a
-        string would be mangled by shlex.split, so only name+specifier
-        should reach pip.
-        """
-        import sys
-
-        current_platform = sys.platform
-        tree = {"pkg": [f'scipy>=1.0; sys_platform == "{current_platform}"']}
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            for p in patches:
-                p.start()
-            try:
-                slicer.pydeps._pip_install_with_skips("pkg", skip_packages=[])
-            finally:
-                for p in patches:
-                    p.stop()
-
-        # Should install both pkg and scipy
-        self.assertEqual(mock_exec.call_count, 2)
-
-        # The scipy call should have just "scipy>=1.0", no marker text
-        scipy_call = mock_exec.call_args_list[1]
-        args = scipy_call[0][1]
-        install_idx = args.index("install")
-        req_arg = args[install_idx + 1]
-        self.assertEqual(req_arg, "scipy>=1.0")
-        self.assertNotIn("sys_platform", " ".join(args))
-
-    def test_preserves_extras_in_pip_call(self):
-        """Test that extras are preserved when constructing the pip argument.
-
-        The marker-stripping fix builds the install string from req.name and
-        req.specifier, but must also include req.extras so that
-        ``package[gpu]>=1.0`` reaches pip as ``package[gpu]>=1.0``, not
-        ``package>=1.0``.
-        """
-        tree = {"pkg[extra1]>=1.0": []}
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            for p in patches:
-                p.start()
-            try:
-                slicer.pydeps._pip_install_with_skips("pkg[extra1]>=1.0", skip_packages=[])
-            finally:
-                for p in patches:
-                    p.stop()
-
-        self.assertEqual(mock_exec.call_count, 1)
-        args = mock_exec.call_args_list[0][0][1]
-        install_idx = args.index("install")
-        req_arg = args[install_idx + 1]
-        self.assertEqual(req_arg, "pkg[extra1]>=1.0")
-
-    def test_already_satisfied_not_reinstalled(self):
-        """Test that already-installed packages are not re-downloaded."""
-        tree = {"pkg": ["numpy>=1.0"]}
-        # numpy is marked as already installed
-        patches = self._mock_dep_tree(tree, installed={"numpy"})
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            for p in patches:
-                p.start()
-            try:
-                slicer.pydeps._pip_install_with_skips("pkg", skip_packages=[])
-            finally:
-                for p in patches:
-                    p.stop()
-
-        # Only pkg should be installed (numpy is already satisfied)
-        self.assertEqual(mock_exec.call_count, 1)
-
-    def test_installs_with_constraints(self):
-        """Test that constraints are passed to each pip call."""
-        tree = {"pkg": ["numpy>=1.0"]}
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            for p in patches:
-                p.start()
-            try:
-                slicer.pydeps._pip_install_with_skips(
-                    "pkg", skip_packages=[], constraints="/path/to/constraints.txt",
-                )
-            finally:
-                for p in patches:
-                    p.stop()
-
-        # Every pip call should include -c constraints
-        for call in mock_exec.call_args_list:
-            args = call[0][1]
-            self.assertIn("-c", args)
-            self.assertIn("/path/to/constraints.txt", args)
-
-
-    def test_top_level_failure_propagates(self):
-        """Test that a top-level install failure raises instead of being swallowed.
-
-        When the package the user explicitly asked for fails to install,
-        the exception should propagate to the caller rather than being
-        silently logged.
-        """
-        from subprocess import CalledProcessError
-
-        tree = {"pkg": []}
-        patches = self._mock_dep_tree(tree)
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            mock_exec.side_effect = CalledProcessError(1, "pip")
-            for p in patches:
-                p.start()
-            try:
-                with self.assertRaises(CalledProcessError):
-                    slicer.pydeps._pip_install_with_skips("pkg", skip_packages=[])
-            finally:
-                for p in patches:
-                    p.stop()
-
-    def test_sub_dependency_failure_continues(self):
-        """Test that a sub-dependency failure is swallowed while other deps are still tried.
-
-        When a transitive dependency fails to install, the function should
-        log a warning and continue installing the remaining dependencies.
-        """
-        from subprocess import CalledProcessError
-
-        tree = {"pkg": ["dep-a>=1.0", "dep-b>=1.0"]}
-        patches = self._mock_dep_tree(tree)
-
-        def selective_fail(module, args, **kwargs):
-            # Find the requirement arg (first arg after "install")
-            install_idx = args.index("install")
-            req_arg = args[install_idx + 1]
-            if req_arg.startswith("dep-a"):
-                raise CalledProcessError(1, "pip")
-            # pkg and dep-b succeed
-
-        with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            mock_exec.side_effect = selective_fail
-            for p in patches:
-                p.start()
-            try:
-                # Should NOT raise despite dep-a failing
-                slicer.pydeps._pip_install_with_skips("pkg", skip_packages=[])
-            finally:
-                for p in patches:
-                    p.stop()
-
-        # Should have attempted all three: pkg, dep-a (fails), dep-b
-        self.assertEqual(mock_exec.call_count, 3)
-
-
-class SkipPackagesValidationTest(unittest.TestCase):
-    """Tests for skip_packages parameter validation in pip_install."""
-
-    def test_nonblocking_raises_valueerror(self):
-        """Test that blocking=False with skip_packages raises ValueError."""
-        with self.assertRaises(ValueError, msg="skip_packages requires blocking=True"):
-            slicer.pydeps.pip_install(
-                "pkg", skip_packages=["torch"], blocking=False,
-            )
-
-    def test_mutual_exclusion_with_no_deps(self):
-        """Test that skip_packages with no_deps_requirements raises ValueError."""
-        with self.assertRaises(ValueError, msg="mutually exclusive"):
-            slicer.pydeps.pip_install(
-                "pkg",
-                skip_packages=["torch"],
-                no_deps_requirements="other-pkg",
-            )
-
-
-class SkipPackagesEnsureTest(unittest.TestCase):
-    """Tests for skip_packages support in pip_ensure."""
-
-    def test_pip_ensure_forwards_skip_packages(self):
-        """Test that pip_ensure passes skip_packages to pip_install."""
-        reqs = [Requirement("nonexistent-package-xyz123>=1.0")]
-
-        if not slicer.app.testingEnabled():
-            self.skipTest("Not in testing mode")
-
-        with unittest.mock.patch("slicer.pydeps.pip_install") as mock_install:
-            mock_install.return_value = ["torch>=2.0"]
-            result = slicer.pydeps.pip_ensure(
-                reqs,
-                skip_packages=["torch"],
-                prompt_install=False,
-                skip_in_testing=False,
-            )
-
-            mock_install.assert_called_once()
-            call_kwargs = mock_install.call_args[1]
-            self.assertEqual(call_kwargs["skip_packages"], ["torch"])
-
-    def test_pip_ensure_returns_skipped_list(self):
-        """Test that pip_ensure returns the skipped list from pip_install."""
-        reqs = [Requirement("nonexistent-package-xyz123>=1.0")]
-
-        if not slicer.app.testingEnabled():
-            self.skipTest("Not in testing mode")
-
-        with unittest.mock.patch("slicer.pydeps.pip_install") as mock_install:
-            mock_install.return_value = ["torch>=2.0", "SimpleITK>=2.0"]
-            result = slicer.pydeps.pip_ensure(
-                reqs,
-                skip_packages=["torch", "SimpleITK"],
-                prompt_install=False,
-                prompt_restart=False,
-                skip_in_testing=False,
-            )
-
-            self.assertEqual(result, ["torch>=2.0", "SimpleITK>=2.0"])
+            os.unlink(path)
+
+
+class ProtectEnvironmentTest(unittest.TestCase):
+    """Tests for protect_environment parameter in _build_pip_args."""
+
+    def test_protect_environment_adds_constraints(self):
+        """Test that protect_environment=True adds a -c flag."""
+        with unittest.mock.patch("slicer.pydeps._generate_environment_constraints", return_value="/tmp/fake.txt"):
+            args = slicer.pydeps._build_pip_args("numpy", protect_environment=True)
+        self.assertIn("-c", args)
+        self.assertIn("/tmp/fake.txt", args)
+
+    def test_protect_environment_false_no_constraints(self):
+        """Test that protect_environment=False does not add constraints."""
+        args = slicer.pydeps._build_pip_args("numpy", protect_environment=False)
+        self.assertNotIn("-c", args)
+
+    def test_protect_environment_skipped_with_no_deps(self):
+        """Test that protect_environment is skipped when no_deps=True."""
+        with unittest.mock.patch("slicer.pydeps._generate_environment_constraints") as mock_gen:
+            args = slicer.pydeps._build_pip_args("numpy", no_deps=True, protect_environment=True)
+        mock_gen.assert_not_called()
+        self.assertIn("--no-deps", args)
+
+    def test_user_constraints_layered_after_env_constraints(self):
+        """Test that user constraints come after auto-generated ones."""
+        with unittest.mock.patch("slicer.pydeps._generate_environment_constraints", return_value="/tmp/env.txt"):
+            args = slicer.pydeps._build_pip_args("numpy", constraints="/user/c.txt", protect_environment=True)
+        # Find positions of -c flags
+        c_indices = [i for i, a in enumerate(args) if a == "-c"]
+        self.assertEqual(len(c_indices), 2)
+        # env constraints should come first
+        self.assertEqual(args[c_indices[0] + 1], "/tmp/env.txt")
+        self.assertEqual(args[c_indices[1] + 1], "/user/c.txt")
 
 
 class NoDepsRequirementsTwoStepTest(unittest.TestCase):

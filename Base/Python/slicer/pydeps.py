@@ -49,22 +49,30 @@ def _generate_environment_constraints() -> str:
     installation from upgrading or downgrading any package already present in
     Slicer's Python environment.
 
-    The caller is responsible for cleaning up the temporary file.
+    Package names are canonicalized and deduplicated. If multiple dist-info
+    directories exist for the same package, the last one encountered wins.
+
+    The temporary file is registered for automatic cleanup on interpreter exit
+    via :func:`atexit.register`.
 
     :returns: Path to the temporary constraints file.
     """
+    import atexit
     import tempfile
 
-    importlib.invalidate_caches()
-    lines = []
+    pins: dict[str, str] = {}
     for dist in importlib.metadata.distributions():
-        name = dist.metadata["Name"]
+        name = canonicalize_name(dist.metadata["Name"])
         version = dist.metadata["Version"]
-        lines.append(f"{name}=={version}")
+        pins[name] = version
+
+    lines = [f"{name}=={version}" for name, version in sorted(pins.items())]
 
     fd, path = tempfile.mkstemp(suffix="-slicer-constraints.txt", prefix="pydeps-")
     with os.fdopen(fd, "w") as f:
-        f.write("\n".join(sorted(lines)))
+        f.write("\n".join(lines) + "\n")
+
+    atexit.register(lambda: os.unlink(path) if os.path.exists(path) else None)
     return path
 
 
@@ -906,8 +914,9 @@ def _build_pip_args(
     if no_deps:
         args.append("--no-deps")
 
-    # Auto-generated constraints to protect existing packages
-    if protect_environment:
+    # Auto-generated constraints to protect existing packages.
+    # Skip when --no-deps is set since pip won't install dependencies anyway.
+    if protect_environment and not no_deps:
         env_constraints = _generate_environment_constraints()
         args.extend(["-c", env_constraints])
 
