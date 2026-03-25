@@ -521,7 +521,9 @@ class ConstraintsTest(unittest.TestCase):
 
         try:
             with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-                slicer.pydeps.pip_install("scipy", constraints=constraints_path)
+                # Use protect_environment=False to isolate user constraints testing
+                slicer.pydeps.pip_install("scipy", constraints=constraints_path,
+                                          protect_environment=False)
 
                 mock_exec.assert_called_once()
                 call_args = mock_exec.call_args
@@ -536,10 +538,10 @@ class ConstraintsTest(unittest.TestCase):
         finally:
             os.unlink(constraints_path)
 
-    def test_pip_install_without_constraints_no_c_flag(self):
-        """Test that pip_install does not pass -c flag when constraints is None."""
+    def test_pip_install_without_constraints_no_user_c_flag(self):
+        """Test that pip_install does not pass user -c flag when constraints is None."""
         with unittest.mock.patch("slicer.pydeps._executePythonModule") as mock_exec:
-            slicer.pydeps.pip_install("scipy")
+            slicer.pydeps.pip_install("scipy", protect_environment=False)
 
             mock_exec.assert_called_once()
             call_args = mock_exec.call_args

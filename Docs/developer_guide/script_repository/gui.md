@@ -1302,7 +1302,7 @@ class MyModuleWidget(ScriptedLoadableModuleWidget):
 ```
 
 Key features of `pip_ensure()`:
-- Shows a confirmation dialog before installing (configurable via `prompt` parameter)
+- Shows a confirmation dialog before installing (configurable via `prompt_install` parameter)
 - Shows a progress dialog during installation with collapsible log details
 - Automatically skips installation in testing mode (`slicer.app.testingEnabled()`)
 

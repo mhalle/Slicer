@@ -459,7 +459,7 @@ def pip_ensure(
     missing = [req for req in requirements if not pip_check(req)]
 
     if not missing:
-        return None  # All satisfied
+        return  # All satisfied
 
     # Check if we're in full Slicer or PythonSlicer
     if not _isSlicerAppAvailable():
@@ -477,7 +477,7 @@ def pip_ensure(
     if skip_in_testing and slicer.app.testingEnabled():
         missing_str = ", ".join(str(req) for req in missing)
         logging.info(f"Testing mode is enabled: skipping pip_ensure for [{missing_str}]")
-        return None
+        return
 
     if prompt_install:
         package_list = "\n".join(f"• {req}" for req in missing)
